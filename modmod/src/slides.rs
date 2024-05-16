@@ -2,7 +2,7 @@
 use std::fmt::{self, Write};
 use std::path::Path;
 
-use error_stack::Result;
+use error_stack::{IntoReport, Result, ResultExt};
 use serde_json::Value as JsonValue;
 
 type JsonObject = serde_json::Map<String, JsonValue>;
@@ -27,6 +27,11 @@ impl fmt::Display for RenderSlidesError {
 
 impl error_stack::Context for RenderSlidesError {}
 
+pub struct SlidesRenderOptions<'t, P: AsRef<Path>> {
+    pub theme: &'t str,
+    pub package_json: Option<P>,
+}
+
 #[derive(Debug)]
 pub struct SlidesPackage<'track> {
     /// Name of the package, corresponds to the name of the track
@@ -44,8 +49,23 @@ impl<'track> SlidesPackage<'track> {
         }
     }
 
-    pub fn render(&self, out_dir: impl AsRef<Path>) -> Result<(), RenderSlidesError> {
-        let mut package_json: JsonObject = serde_json::from_str(PACKAGE_JSON_CONTENT_STUB).unwrap();
+    pub fn render<P: AsRef<Path>>(
+        &self,
+        out_dir: impl AsRef<Path>,
+        options: SlidesRenderOptions<'_, P>,
+    ) -> Result<(), RenderSlidesError> {
+        let SlidesRenderOptions {
+            theme,
+            package_json,
+        } = options;
+
+        let mut package_json: JsonObject = match package_json {
+            Some(p) => serde_json::from_str(&p.read_to_string()?)
+                .into_report()
+                .change_context(RenderSlidesError)?,
+            None => serde_json::from_str(PACKAGE_JSON_CONTENT_STUB).unwrap(),
+        };
+
         package_json.insert("name".into(), to_tag(self.name).into());
         let mut package_scripts = JsonObject::new();
 
@@ -130,11 +150,14 @@ impl<'track> SlidesPackage<'track> {
                 .replace("#[modmod:unit_title]", deck.name)
                 .replace("#[modmod:content]", &unit_content)
                 .replace("#[modmod:objectives]", &unit_objectives)
-                .replace("#[modmod:summary]", &unit_summary);
+                .replace("#[modmod:summary]", &unit_summary)
+                .replace("#[modmod:theme]", theme);
 
             deck_file.write_all(slides_content)?;
         }
 
+        // Add underscore key, so that preceding lines can have a trailing comma
+        package_scripts.insert("_".into(), "".into());
         package_json.insert("scripts".into(), package_scripts.into());
         let package_json = serde_json::to_string_pretty(&package_json).unwrap();
         let package_json_file = slides_output_dir.join("package.json");
